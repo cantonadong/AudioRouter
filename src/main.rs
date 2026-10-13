@@ -295,6 +295,9 @@ unsafe fn show_panel(ptr: *mut Ui, reposition: bool) {
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
         SetFocus(hwnd);
+        // Activation can be denied, or deactivation skipped during a menu/drag.
+        // Recheck after Windows has completed the foreground transition.
+        SetTimer(hwnd, 9, 150, null());
     }
 }
 
@@ -675,7 +678,10 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
                 return 0;
             }
             0x0018 if !popup => {
-                if wp == 0 { (&mut *ptr).reset_collapses(); }
+                if wp == 0 {
+                    KillTimer(hwnd, 9);
+                    (&mut *ptr).reset_collapses();
+                }
                 (&*ptr).send(audio::Command::Meter(wp != 0));
             }
             audio::WM_AUDIO_PEAK if !popup => {
@@ -683,6 +689,22 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
                 if IsWindowVisible(hwnd) != 0 {
                     if let Some(peaks) = peaks {
                         if (&mut *ptr).apply_peaks(peaks) { InvalidateRect(hwnd,null(),0); }
+                    }
+                }
+                return 0;
+            }
+            WM_TIMER if !popup && wp == 9 => {
+                if IsWindowVisible(hwnd) == 0 {
+                    KillTimer(hwnd, 9);
+                    return 0;
+                }
+                if (*ptr).tray_present && !(*ptr).menu_opening && (*ptr).dragging.is_none() {
+                    let foreground = GetForegroundWindow();
+                    let menu = (*ptr).popup;
+                    if foreground != 0 && foreground != hwnd
+                        && !(menu != 0 && foreground == menu && IsWindowVisible(menu) != 0)
+                    {
+                        effect(ptr, Effect::Hide);
                     }
                 }
                 return 0;
@@ -789,7 +811,9 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
                 if (*ptr).menu_opening || (*ptr).dragging.is_some() {
                     return 0;
                 }
-                let foreground = GetForegroundWindow();
+                // WM_ACTIVATE is synchronous; GetForegroundWindow may still
+                // report the old window. lParam identifies the new active one.
+                let foreground = lp;
                 if popup {
                     if foreground != (*ptr).hwnd {
                         close_menu(ptr);
