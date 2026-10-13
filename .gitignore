@@ -1,0 +1,9 @@
+/target/
+/WinSpeaker.exe
+/resources/app.res
+/resources/app.ico
+/resources/app.o
+/AudioRouter.exe
+/AudioRouter.ini
+/AudioRouter.ini.bak
+/*.log
