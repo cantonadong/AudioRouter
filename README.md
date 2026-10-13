@@ -1,5 +1,7 @@
 # AudioRouter
 
+<img width="549" height="437" alt="image" src="https://github.com/user-attachments/assets/713faf9b-2497-4378-8cca-e90f36c5f731" />
+
 Windows 10/11 原生音量工具，Rust + Win32/GDI。1.0 已接入真实音频数据。
 
 双击根目录 AudioRouter.exe。面板宽 360 逻辑像素，行高 44，按显示器 DPI 缩放。
