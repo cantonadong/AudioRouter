@@ -107,9 +107,9 @@ def version_block(key, value=b"", children=b"", text=False):
 
 
 def make_version():
-    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, 0x00010001, 0, 0x00010001, 0, 0x3F, 0, 0x40004, 1, 0, 0, 0)
+    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, 0x00010002, 0, 0x00010002, 0, 0x3F, 0, 0x40004, 1, 0, 0, 0)
     strings = b""
-    for key, value in [("CompanyName", "cantonadong"), ("LegalCopyright", "Copyright (c) cantonadong"), ("FileDescription", "AudioRouter"), ("ProductName", "AudioRouter"), ("FileVersion", "1.1.0.0"), ("ProductVersion", "1.1.0.0"), ("OriginalFilename", "AudioRouter.exe")]:
+    for key, value in [("CompanyName", "cantonadong"), ("LegalCopyright", "Copyright (c) cantonadong"), ("FileDescription", "AudioRouter"), ("ProductName", "AudioRouter"), ("FileVersion", "1.2.0.0"), ("ProductVersion", "1.2.0.0"), ("OriginalFilename", "AudioRouter.exe")]:
         strings += align(version_block(key, (value + "\0").encode("utf-16-le"), text=True))
     table = version_block("040904B0", children=strings, text=True)
     info = version_block("StringFileInfo", children=align(table), text=True)
@@ -176,9 +176,13 @@ def volume_pixels(level, size=256, tray=False):
         for x in range(size):
             px, py = (x+0.5)*32/size, (y+0.5)*32/size
             if tray:
-                # Fill the tray slot like the adjacent Windows icons.
-                px = (px-16)/1.16+16
-                py = (py-16)/1.30+16
+                # Fit the full stroked outline (x=3.2..29.9) inside a
+                # two-unit transparent border. Center on the artwork, not
+                # the canvas; stretching the old artwork left almost no
+                # left margin and clipped the tallest wave vertically.
+                tray_scale = 28 / (29.9 - 3.2)
+                px = (px-16)/tray_scale+(3.2+29.9)/2
+                py = (py-16)/tray_scale+16
             distance = 1000
             for (ax,ay),(bx,by) in segments:
                 dx,dy = bx-ax,by-ay
@@ -211,6 +215,31 @@ def volume_pixels(level, size=256, tray=False):
     return size,size,pixels
 
 
+def status_images():
+    width, height, pixels = read_png(ROOT / "pic/status.png")
+    # The supplied sheet has four states separated by transparent gutters.
+    boundaries = [0, round(width * 355 / 1511), round(width * 750 / 1511),
+                  round(width * 1148 / 1511), width]
+    images = []
+    for left, right in zip(boundaries, boundaries[1:]):
+        occupied = [(x, y) for y in range(height) for x in range(left, right)
+                    if pixels[y][x][3]]
+        if not occupied:
+            raise ValueError("Status sheet contains an empty state")
+        x0 = min(x for x, y in occupied)
+        x1 = max(x for x, y in occupied) + 1
+        y0 = min(y for x, y in occupied)
+        y1 = max(y for x, y in occupied) + 1
+        # Reserve at least one transparent pixel per side at 16px display size.
+        size = math.ceil(max(x1-x0, y1-y0) * 8 / 7)
+        canvas = [[(0, 0, 0, 0) for _ in range(size)] for _ in range(size)]
+        dx, dy = (size-(x1-x0)) // 2, (size-(y1-y0)) // 2
+        for y in range(y0, y1):
+            canvas[dy+y-y0][dx:dx+x1-x0] = pixels[y][x0:x1]
+        images.append((size, size, canvas))
+    return images
+
+
 def main():
     width, height, pixels = read_png(ROOT / "pic/ico.png")
     sizes = [16, 24, 32, 48, 64, 128, 256]
@@ -226,11 +255,12 @@ def main():
         image_offset += len(image)
     resource_items.append((14, 1, group))
     ordinal = len(images) + 1
+    state_images = status_images()
     for level in range(4):
-        vw,vh,vpixels = volume_pixels(level)
-        (ROOT / f"resources/volume{level}.bin").write_bytes(icon_image(vw,vh,vpixels,128))
-        tw,th,tpixels = volume_pixels(level,tray=True)
-        (ROOT / f"resources/tray-volume{level}.bin").write_bytes(icon_image(tw,th,tpixels,128))
+        vw,vh,vpixels = state_images[level]
+        state_icon = icon_image(vw,vh,vpixels,128)
+        (ROOT / f"resources/volume{level}.bin").write_bytes(state_icon)
+        (ROOT / f"resources/tray-volume{level}.bin").write_bytes(state_icon)
         volume_group = bytearray(struct.pack("<HHH", 0, 1, 4))
         for size in [16,24,32,48]:
             image = icon_image(vw,vh,vpixels,size)

@@ -244,6 +244,8 @@ unsafe extern "system" {
     pub fn MonitorFromPoint(point: Point, flags: u32) -> Handle;
     pub fn GetMonitorInfoW(monitor: Handle, info: *mut MonitorInfo) -> i32;
     pub fn GetDpiForWindow(hwnd: Handle) -> u32;
+    pub fn FindWindowW(class: *const u16, title: *const u16) -> Handle;
+    pub fn GetSystemMetricsForDpi(index: i32, dpi: u32) -> i32;
     pub fn SetProcessDpiAwarenessContext(context: Handle) -> i32;
     pub fn RegisterWindowMessageW(text: *const u16) -> u32;
     pub fn MessageBoxW(hwnd: Handle, text: *const u16, caption: *const u16, flags: u32) -> i32;

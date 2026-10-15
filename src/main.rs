@@ -125,9 +125,6 @@ fn main() {
             *handle = paint::volume_icon(instance, level);
             if *handle == 0 { config::log(&format!("创建音量图标失败: level={level}, error={}", GetLastError())); }
         }
-        for (level, handle) in state.tray_icons.iter_mut().enumerate() {
-            *handle = paint::tray_volume_icon(level);
-        }
         state.scale = GetDpiForWindow(hwnd).max(96) as f64 / 96.0;
         state.taskbar_message = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
         state.show_message = RegisterWindowMessageW(wide("AudioRouter.Show.Native.v1").as_ptr());
@@ -194,13 +191,40 @@ unsafe fn tray_data(ptr: *mut Ui) -> NotifyIcon {
 unsafe fn add_tray(ptr: *mut Ui) {
     unsafe {
         (*ptr).tray_level = None;
+        rebuild_tray_icons(ptr);
         let data = tray_data(ptr);
-        (*ptr).tray_present = Shell_NotifyIconW(NIM_ADD, &data) != 0;
+        // TaskbarCreated also occurs on DPI changes, when the icon may still exist.
+        (*ptr).tray_present = Shell_NotifyIconW(NIM_ADD, &data) != 0
+            || Shell_NotifyIconW(1, &data) != 0;
+        if !(*ptr).tray_present {
+            config::log(&format!("Tray registration failed: error={}", GetLastError()));
+            SetTimer((*ptr).hwnd, 10, 2000, null());
+        }
         if (*ptr).tray_present && (*ptr).tray_hook == 0 {
             TRAY_HWND.store((*ptr).hwnd,std::sync::atomic::Ordering::Release);
             (*ptr).tray_hook = SetWindowsHookExW(14,Some(tray_mouse_hook),(*ptr).instance,0);
             if (*ptr).tray_hook == 0 { config::log(&format!("托盘滚轮监听失败：{}",GetLastError())); }
         }
+    }
+}
+
+unsafe fn rebuild_tray_icons(ptr: *mut Ui) {
+    unsafe {
+        // The hidden panel can be on a different monitor from the taskbar.
+        let taskbar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), null());
+        let dpi = GetDpiForWindow(if taskbar != 0 { taskbar } else { (*ptr).hwnd }).max(96);
+        let width = GetSystemMetricsForDpi(49, dpi).max(16); // SM_CXSMICON
+        let height = GetSystemMetricsForDpi(50, dpi).max(16); // SM_CYSMICON
+        let icons = std::array::from_fn::<_, 4, _>(|level| paint::tray_volume_icon(level, width, height));
+        if icons.contains(&0) {
+            config::log(&format!("Tray icon creation failed: dpi={dpi}, size={width}x{height}, error={}", GetLastError()));
+            for icon in icons { if icon != 0 { DestroyIcon(icon); } }
+            return;
+        }
+        let previous = std::mem::replace(&mut (*ptr).tray_icons, icons);
+        for icon in previous { if icon != 0 { DestroyIcon(icon); } }
+        (*ptr).tray_level = None;
+        config::log(&format!("Tray icons rebuilt: dpi={dpi}, size={width}x{height}"));
     }
 }
 
@@ -212,10 +236,14 @@ unsafe fn update_tray_model(ptr: *mut Ui, model: &model::Model) {
             let mut data = tray_data(ptr);
             let volume = model.default.and_then(|i| model.devices.get(i)).map(|d| d.volume).unwrap_or(0);
             if (*ptr).tray_level == Some((level,volume)) { return; }
+            // A tooltip-only change must not resubmit the icon to Explorer.
+            if (*ptr).tray_level.is_some_and(|(previous, _)| previous == level) {
+                data.flags = NIF_TIP;
+            }
             set_tray_tip(&mut data,model);
             if (*ptr).tray_icons[level] != 0 { data.icon = (*ptr).tray_icons[level]; }
-            (*ptr).tray_level = Some((level,volume));
             if Shell_NotifyIconW(1, &data) == 0 { config::log("更新托盘音量图标失败"); add_tray(ptr); }
+            else { (*ptr).tray_level = Some((level,volume)); }
         }
     }
 }
@@ -663,6 +691,7 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
         }
         let popup = hwnd == (*ptr).popup;
         if msg == (*ptr).taskbar_message && !popup {
+            config::log("TaskbarCreated received");
             add_tray(ptr);
             return 0;
         }
@@ -671,6 +700,19 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
             return 0;
         }
         match msg {
+            // Coalesce display/settings/resume changes; Explorer may need time
+            // to finish rebuilding its taskbar before accepting the new icon.
+            0x007E | 0x001A | 0x0218 if !popup => {
+                config::log(&format!("Tray environment change: message=0x{msg:04X}, wparam={wp}"));
+                SetTimer(hwnd, 10, 1500, null());
+            }
+            WM_TIMER if !popup && wp == 10 => {
+                KillTimer(hwnd, 10);
+                rebuild_tray_icons(ptr);
+                if (*ptr).tray_present { update_tray(ptr); }
+                else { add_tray(ptr); }
+                return 0;
+            }
             WM_TRAY_WHEEL if !popup => {
                 (&mut *ptr).tray_wheel_volume(wp as i32);
                 update_tray(ptr);
