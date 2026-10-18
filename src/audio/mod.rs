@@ -163,6 +163,7 @@ struct Session {
     name: String,
     path: String,
     pid: u32,
+    process: Option<TrackedProcess>,
     scalar: f32,
     muted: bool,
     needs_apply: bool,
@@ -185,6 +186,17 @@ impl TrackedProcess {
     }
 }
 impl Session {
+    fn process_running(&self) -> bool {
+        if self.pid == 0 {
+            return self.key == "__system_sounds__" && self.control.number(3).unwrap_or(2) != 2;
+        }
+        // Keep the original process handle so a reused PID cannot revive an old app.
+        self.process.as_ref().map_or_else(
+            || self.control.number(3).is_ok_and(|state| state != 2),
+            TrackedProcess::alive,
+        )
+    }
+
     fn new(control: Com, wake: &Arc<Wake>) -> Result<Self, String> {
         let volume = control.query(&SIMPLE_VOLUME)?;
         let meter = control.query(&AUDIO_METER).ok();
@@ -221,6 +233,10 @@ impl Session {
         control.callback(10, sink.0)?;
         let scalar = volume.scalar(4).unwrap_or(1.0);
         let muted = volume.number(6).unwrap_or(0) != 0;
+        let process = if is_system || pid == 0 { None } else {
+            let handle = unsafe { OpenProcess(0x1000, 0, pid) };
+            (handle != 0).then(|| TrackedProcess { handle, key: key.clone() })
+        };
         Ok(Self {
             control,
             volume,
@@ -231,6 +247,7 @@ impl Session {
             name,
             path,
             pid: if is_system { 0 } else { pid },
+            process,
             scalar,
             muted,
             needs_apply: true,
@@ -304,9 +321,6 @@ impl Endpoint {
                     continue;
                 }
                 let control = Com::from_result(ptr)?.query(&SESSION_CONTROL)?;
-                if control.number(3).unwrap_or(2) == 2 {
-                    continue;
-                }
                 let id = control.string(13)?;
                 if let Some(session) = old.remove(&id) {
                     self.sessions.push(session);
@@ -317,10 +331,10 @@ impl Endpoint {
                     }
                 }
             }
-            self.sessions.extend(
-                old.into_values()
-                    .filter(|s| s.control.number(3).unwrap_or(2) != 2),
-            );
+            // Session state describes streams, not process lifetime. A running
+            // app can close its last stream and still need to remain adjustable.
+            self.sessions.extend(old.into_values());
+            self.sessions.retain(Session::process_running);
             self.sessions
                 .sort_by(|a, b| (&a.key, &a.id).cmp(&(&b.key, &b.id)));
             Ok(())
@@ -452,11 +466,10 @@ impl Backend {
             if let Some(endpoint) = self.endpoints.iter_mut().find(|d| d.id == device) {
                 if let Ok(control) = control.query(&SESSION_CONTROL) {
                     if let Ok(id) = control.string(13) {
-                        if !endpoint.sessions.iter().any(|s| s.id == id)
-                            && control.number(3).unwrap_or(2) != 2
-                        {
+                        if !endpoint.sessions.iter().any(|s| s.id == id) {
                             match Session::new(control, &self.wake) {
-                                Ok(session) => endpoint.sessions.push(session),
+                                Ok(session) if session.process_running() => endpoint.sessions.push(session),
+                                Ok(_) => {},
                                 Err(error) => config::log(&error),
                             }
                         }
@@ -754,6 +767,7 @@ impl Backend {
     }
     fn snapshot(&self) -> Model {
         let mut devices = vec![];
+        let mut route_warning = None;
         let mut ordered: Vec<_> = self.endpoints.iter().collect();
         ordered.sort_by_key(|endpoint| self.default.as_ref() == Some(&endpoint.id));
         let default = self.default.as_ref().and_then(|id| ordered.iter().position(|d| &d.id == id)).unwrap_or(0);
@@ -768,8 +782,22 @@ impl Backend {
             if self.config.hidden_apps.contains_key(key) { continue; }
             let preferred_route = if key == "__system_sounds__" { None } else { self.config.routes.get(key).cloned() };
             let route = preferred_route.as_ref().and_then(|id| ordered.iter().position(|d| &d.id == id));
-            let target = route.unwrap_or(default);
+            // A persisted preference is not evidence that an existing stream moved.
+            // Keep the app under its real active endpoint until Windows creates
+            // the replacement session. Ignore inactive sessions left on old devices.
+            let active_on = |index: usize| ordered[index].sessions.iter().any(|s|
+                s.key == key && s.control.number(3).unwrap_or(0) == 1);
+            let target = route.filter(|&index| active_on(index))
+                .or_else(|| (0..ordered.len()).find(|&index| active_on(index)))
+                .or_else(|| route.filter(|&index| ordered[index].sessions.iter().any(|s| s.key == key)))
+                .or_else(|| (0..ordered.len()).find(|&index| ordered[index].sessions.iter().any(|s| s.key == key)))
+                .unwrap_or(default);
             let representative = ordered.get(target).and_then(|d| d.sessions.iter().find(|s| s.key == key)).unwrap_or(sessions[0]);
+            let expected = route.unwrap_or(default);
+            if active_on(target) && target != expected && route_warning.is_none() {
+                route_warning = Some(format!("{} 仍在 {} 播放，目标为 {}。请停止后重新播放；若仍未切换，请检查播放器自身的输出设备设置。",
+                    representative.name, ordered[target].name, ordered[expected].name));
+            }
             let muted = sessions.iter().all(|s| s.muted);
             if let Some(device) = devices.get_mut(target) {
                 device.apps.push(App { key: key.into(), name: representative.name.clone(), icon_path: representative.path.clone(),
@@ -794,7 +822,7 @@ impl Backend {
             devices,
             startup: self.startup,
             routing_available: self.routing.is_some(),
-            error: self.error.clone(),
+            error: self.error.clone().or(route_warning),
         }
     }
     fn flush(&mut self) {
@@ -861,6 +889,9 @@ fn worker(receiver: mpsc::Receiver<Command>, wake: Arc<Wake>, updates: Arc<Updat
     };
     let mut metering = false;
     let mut next_peak = Instant::now();
+    // Process exits do not always produce another audio notification (for
+    // example, after the app already closed its last stream).
+    let mut next_sessions = Instant::now() + Duration::from_secs(2);
     loop {
         let timeout = backend
             .as_ref()
@@ -872,10 +903,15 @@ fn worker(receiver: mpsc::Receiver<Command>, wake: Arc<Wake>, updates: Arc<Updat
             })
             .unwrap_or(u32::MAX);
         let timeout = if metering { timeout.min(next_peak.saturating_duration_since(Instant::now()).as_millis().min(u32::MAX as u128) as u32) } else { timeout };
+        let timeout = timeout.min(next_sessions.saturating_duration_since(Instant::now()).as_millis().min(u32::MAX as u128) as u32);
         unsafe {
             WaitForSingleObject(wake.event, timeout);
         }
-        let flags = wake.flags.swap(0, Ordering::AcqRel);
+        let mut flags = wake.flags.swap(0, Ordering::AcqRel);
+        if Instant::now() >= next_sessions {
+            flags |= STRUCTURE;
+            next_sessions = Instant::now() + Duration::from_secs(2);
+        }
         let mut commands: Vec<_> = receiver.try_iter().collect();
         commands.retain(|command| {
             if let Command::Meter(enabled) = command {

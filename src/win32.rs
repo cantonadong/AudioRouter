@@ -179,6 +179,9 @@ unsafe extern "system" {
     pub fn PostQuitMessage(code: i32);
     pub fn PostMessageW(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> i32;
     pub fn SendMessageW(hwnd: Handle, msg: u32, wp: usize, lp: isize) -> isize;
+    pub fn EnumWindows(callback: Option<unsafe extern "system" fn(Handle, isize) -> i32>, param: isize) -> i32;
+    pub fn GetWindowThreadProcessId(hwnd: Handle, process: *mut u32) -> u32;
+    pub fn GetClassNameW(hwnd: Handle, class: *mut u16, count: i32) -> i32;
     pub fn ShowWindow(hwnd: Handle, cmd: i32) -> i32;
     pub fn DestroyWindow(hwnd: Handle) -> i32;
     pub fn IsWindowVisible(hwnd: Handle) -> i32;

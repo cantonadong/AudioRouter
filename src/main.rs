@@ -243,7 +243,10 @@ unsafe fn update_tray_model(ptr: *mut Ui, model: &model::Model) {
             set_tray_tip(&mut data,model);
             if (*ptr).tray_icons[level] != 0 { data.icon = (*ptr).tray_icons[level]; }
             if Shell_NotifyIconW(1, &data) == 0 { config::log("更新托盘音量图标失败"); add_tray(ptr); }
-            else { (*ptr).tray_level = Some((level,volume)); }
+            else {
+                (*ptr).tray_level = Some((level,volume));
+                refresh_native_tray_tip(ptr);
+            }
         }
     }
 }
@@ -251,10 +254,47 @@ unsafe fn update_tray(ptr: *mut Ui) {
     unsafe { update_tray_model(ptr, &(*ptr).model); }
 }
 fn set_tray_tip(data: &mut NotifyIcon, model: &model::Model) {
-    let volume = model.default.and_then(|i| model.devices.get(i)).map(|d| d.volume).unwrap_or(0);
-    let tip = wide(&format!("音量 {}%",volume));
+    let tip = wide(&tray_tip_text(model));
     data.tip.fill(0);
     data.tip[..tip.len()].copy_from_slice(&tip);
+}
+fn tray_tip_text(model: &model::Model) -> String {
+    let volume = model.default.and_then(|i| model.devices.get(i)).map(|d| d.volume).unwrap_or(0);
+    format!("音量 {}%", volume)
+}
+
+unsafe extern "system" fn redraw_shell_tip(hwnd: Handle, process: isize) -> i32 {
+    unsafe {
+        let mut pid = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == process as u32 && IsWindowVisible(hwnd) != 0 {
+            let mut class = [0u16; 64];
+            let length = GetClassNameW(hwnd, class.as_mut_ptr(), class.len() as i32);
+            if length > 0 && String::from_utf16_lossy(&class[..length as usize]) == "tooltips_class32" {
+                // TTM_UPDATE: repaint Explorer's existing native tooltip.
+                // No custom window, text buffer, or synthetic mouse movement.
+                PostMessageW(hwnd, 0x041D, 0, 0);
+            }
+        }
+        1
+    }
+}
+
+unsafe fn refresh_native_tray_tip(ptr: *mut Ui) {
+    unsafe {
+        let identifier = NotifyIconIdentifier { size: size_of::<NotifyIconIdentifier>() as u32,
+            hwnd: (*ptr).hwnd, id: 1, guid: [0;16] };
+        let mut rect = Rect::default();
+        let mut cursor = Point::default();
+        if GetCursorPos(&mut cursor) == 0
+            || Shell_NotifyIconGetRect(&identifier, &mut rect) < 0
+            || !rect.contains(cursor) { return; }
+        let taskbar = FindWindowW(wide("Shell_TrayWnd").as_ptr(), null());
+        let mut pid = 0;
+        if taskbar != 0 && GetWindowThreadProcessId(taskbar, &mut pid) != 0 {
+            EnumWindows(Some(redraw_shell_tip), pid as isize);
+        }
+    }
 }
 
 unsafe fn monitor_work(point: Point) -> Rect {

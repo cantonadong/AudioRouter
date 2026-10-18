@@ -755,9 +755,7 @@ impl Ui {
             let mut y = TOP - self.scroll;
             for (di, device) in self.model.devices.iter().enumerate() {
                 c.fill(Rect::new(1, y, width - 2, HEADER), DEVICE_BG);
-                if self.hovered == Some(Action::Collapse(di)) {
-                    c.fill(Rect::new(1, y, width - 2, 48), 0x80531A);
-                }
+                c.fill(Rect::new(1, y, width - 2, 48), 0x80531A);
                 let assigned = device.apps.iter().filter(|app| app.preferred_route.as_ref() == Some(&device.id)).count();
                 let label = if self.model.default == Some(di) {
                     format!("{}（默认）", device.name)

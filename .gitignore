@@ -7,3 +7,4 @@
 /AudioRouter.ini
 /AudioRouter.ini.bak
 /*.log
+__pycache__/

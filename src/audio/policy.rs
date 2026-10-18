@@ -121,7 +121,10 @@ impl Routing {
     pub fn set(&self, pid: u32, device: Option<&str>) -> Result<(), String> {
         unsafe {
             let desired = device.map(str::to_owned);
-            let changed: Vec<_> = (0..3)
+            // This per-process API supports multimedia and console routing.
+            // Unlike the system default API, writing the communications role can
+            // return E_INVALIDARG after the other roles have already changed.
+            let changed: Vec<_> = [1, 0].into_iter()
                 .filter(|role| self.get_role(pid, *role) != Some(desired.clone()))
                 .collect();
             if changed.is_empty() { return Ok(()); }
@@ -144,7 +147,13 @@ impl Routing {
                 }
             }
             (self.delete)(string);
-            result
+            result?;
+            for role in [1, 0] {
+                if self.get_role(pid, role) != Some(desired.clone()) {
+                    return Err(format!("应用输出路由未确认保存（PID {pid}，角色 {role}）"));
+                }
+            }
+            Ok(())
         }
     }
 

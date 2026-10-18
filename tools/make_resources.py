@@ -107,9 +107,9 @@ def version_block(key, value=b"", children=b"", text=False):
 
 
 def make_version():
-    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, 0x00010002, 0, 0x00010002, 0, 0x3F, 0, 0x40004, 1, 0, 0, 0)
+    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, 0x00010003, 0, 0x00010003, 0, 0x3F, 0, 0x40004, 1, 0, 0, 0)
     strings = b""
-    for key, value in [("CompanyName", "cantonadong"), ("LegalCopyright", "Copyright (c) cantonadong"), ("FileDescription", "AudioRouter"), ("ProductName", "AudioRouter"), ("FileVersion", "1.2.0.0"), ("ProductVersion", "1.2.0.0"), ("OriginalFilename", "AudioRouter.exe")]:
+    for key, value in [("CompanyName", "cantonadong"), ("LegalCopyright", "Copyright (c) cantonadong"), ("FileDescription", "AudioRouter"), ("ProductName", "AudioRouter"), ("FileVersion", "1.3.0.0"), ("ProductVersion", "1.3.0.0"), ("OriginalFilename", "AudioRouter.exe")]:
         strings += align(version_block(key, (value + "\0").encode("utf-16-le"), text=True))
     table = version_block("040904B0", children=strings, text=True)
     info = version_block("StringFileInfo", children=align(table), text=True)
