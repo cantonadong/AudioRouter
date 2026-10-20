@@ -600,15 +600,16 @@ impl Backend {
                     imported = true;
                 }
             }
-            let desired = self.config.routes.get(&key).and_then(|id| {
-                if active.contains(id) {
-                    Some(id.clone())
-                } else {
-                    self.default
-                        .clone()
-                        .or_else(|| self.endpoints.first().map(|d| d.id.clone()))
-                }
-            });
+            // Resolve logical "follow default" to the current endpoint. Clearing
+            // the persisted override alone can leave an existing stream on its
+            // previous device. Cache the resolved ID so default changes also
+            // cause a new routing write, without pinning it in our preferences.
+            let desired = match self.config.routes.get(&key) {
+                Some(id) if active.contains(id) => Some(id.clone()),
+                Some(_) => self.default.clone()
+                    .or_else(|| self.endpoints.first().map(|d| d.id.clone())),
+                None => self.default.clone(),
+            };
             let cache_key = (pid, key);
             if self.applied.get(&cache_key) == Some(&desired) {
                 continue;
@@ -696,6 +697,8 @@ impl Backend {
                 self.enforce_routes(true)?;
             }
             Command::Route { app, device } => {
+                // Windows may have changed its default since the last callback.
+                self.read_default();
                 if app == "__system_sounds__" {
                     return Err("系统声音由 Windows 管理，跟随默认播放设备".into());
                 }
@@ -719,8 +722,10 @@ impl Backend {
                 if pids.is_empty() {
                     return Err("应用音频会话已结束，请重新播放后再选择设备".into());
                 }
+                let target = device.as_ref().or(self.default.as_ref())
+                    .ok_or("当前没有可用的默认播放设备")?;
                 for pid in pids {
-                    routing.set(pid, device.as_deref())?;
+                    routing.set(pid, Some(target.as_str()))?;
                 }
                 if let Some(device) = device {
                     self.config.explicit_routes.insert(app.clone());

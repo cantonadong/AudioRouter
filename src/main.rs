@@ -18,6 +18,19 @@ use win32::*;
 const CLASS: &str = "AudioRouter.Native.v1";
 static TRAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
+// Record event order with millisecond precision without logging window titles.
+unsafe fn log_panel_event(ptr: *mut Ui, reason: &str, target: Handle) {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    unsafe {
+        config::log(&format!(
+            "Panel {reason}: ms={}, hwnd={}, foreground={}, target={}, visible={}, popup={}, menu_opening={}, dragging={}",
+            START.get_or_init(std::time::Instant::now).elapsed().as_millis(),
+            (*ptr).hwnd, GetForegroundWindow(), target, IsWindowVisible((*ptr).hwnd),
+            (*ptr).popup, (*ptr).menu_opening, (*ptr).dragging.is_some(),
+        ));
+    }
+}
+
 unsafe extern "system" fn tray_mouse_hook(code: i32, wp: usize, lp: isize) -> isize {
     unsafe {
         if code >= 0 && wp as u32 == WM_MOUSEWHEEL {
@@ -360,9 +373,11 @@ unsafe fn show_panel(ptr: *mut Ui, reposition: bool) {
         (&mut *ptr).reset_collapses();
         resize_panel(ptr, reposition);
         let hwnd = (*ptr).hwnd;
+        log_panel_event(ptr, "show-request", 0);
         ShowWindow(hwnd, SW_SHOW);
-        SetForegroundWindow(hwnd);
+        let activated = SetForegroundWindow(hwnd);
         SetFocus(hwnd);
+        log_panel_event(ptr, if activated != 0 { "show-activated" } else { "show-activation-denied" }, 0);
         // Activation can be denied, or deactivation skipped during a menu/drag.
         // Recheck after Windows has completed the foreground transition.
         SetTimer(hwnd, 9, 150, null());
@@ -587,6 +602,7 @@ unsafe fn effect(ptr: *mut Ui, effect: Effect) {
                 show_panel(ptr, true);
             }
             Effect::Hide => {
+                log_panel_event(ptr, "hide-request", 0);
                 clear_tip(ptr);
                 close_menu(ptr);
                 if (*ptr).tray_present {
@@ -786,6 +802,7 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
                     if foreground != 0 && foreground != hwnd
                         && !(menu != 0 && foreground == menu && IsWindowVisible(menu) != 0)
                     {
+                        log_panel_event(ptr, "auto-hide-timer", foreground);
                         effect(ptr, Effect::Hide);
                     }
                 }
@@ -889,6 +906,7 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
                 return 1;
             }
             WM_ACTIVATE if wp & 0xFFFF == 0 => {
+                log_panel_event(ptr, if popup { "popup-deactivated" } else { "deactivated" }, lp);
                 if !popup { clear_tip(ptr); }
                 if (*ptr).menu_opening || (*ptr).dragging.is_some() {
                     return 0;
@@ -900,11 +918,13 @@ unsafe extern "system" fn window_proc(hwnd: Handle, msg: u32, wp: usize, lp: isi
                     if foreground != (*ptr).hwnd {
                         close_menu(ptr);
                         if (*ptr).tray_present {
+                            log_panel_event(ptr, "auto-hide-popup-deactivated", foreground);
                             ShowWindow((*ptr).hwnd, SW_HIDE);
                         }
                     }
                 } else if foreground != (*ptr).popup || IsWindowVisible((*ptr).popup) == 0 {
                     if (*ptr).tray_present {
+                        log_panel_event(ptr, "auto-hide-deactivated", foreground);
                         ShowWindow(hwnd, SW_HIDE);
                     }
                 }
