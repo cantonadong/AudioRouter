@@ -228,7 +228,7 @@ unsafe fn rebuild_tray_icons(ptr: *mut Ui) {
         let dpi = GetDpiForWindow(if taskbar != 0 { taskbar } else { (*ptr).hwnd }).max(96);
         let width = GetSystemMetricsForDpi(49, dpi).max(16); // SM_CXSMICON
         let height = GetSystemMetricsForDpi(50, dpi).max(16); // SM_CYSMICON
-        let icons = std::array::from_fn::<_, 4, _>(|level| paint::tray_volume_icon(level, width, height));
+        let icons = std::array::from_fn::<_, 4, _>(|level| paint::tray_volume_icon((*ptr).instance, level, width, height));
         if icons.contains(&0) {
             config::log(&format!("Tray icon creation failed: dpi={dpi}, size={width}x{height}, error={}", GetLastError()));
             for icon in icons { if icon != 0 { DestroyIcon(icon); } }

@@ -343,14 +343,10 @@ pub fn volume_icon(_instance: Handle, level: usize) -> Handle {
     unsafe { CreateIconFromResourceEx(data.as_ptr() as *mut u8,data.len() as u32,1,0x30000,128,128,0) }
 }
 
-pub fn tray_volume_icon(level: usize, width: i32, height: i32) -> Handle {
-    let data: &[u8] = match level {
-        0 => include_bytes!("../resources/tray-volume0.bin"),
-        1 => include_bytes!("../resources/tray-volume1.bin"),
-        2 => include_bytes!("../resources/tray-volume2.bin"),
-        _ => include_bytes!("../resources/tray-volume3.bin"),
-    };
-    unsafe { CreateIconFromResourceEx(data.as_ptr() as *mut u8,data.len() as u32,1,0x30000,width,height,0) }
+pub fn tray_volume_icon(instance: Handle, level: usize, width: i32, height: i32) -> Handle {
+    // Each group contains artwork sampled directly at the taskbar's pixel
+    // size, rather than a single bitmap that Windows must rescale again.
+    unsafe { LoadImageW(instance, (level.min(3) + 2) as *const u16, 1, width, height, 0) }
 }
 
 pub fn tooltip_size(hwnd: Handle, scale: f64, text: &str, max_width: i32) -> (i32,i32,String) {

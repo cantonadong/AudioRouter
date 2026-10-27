@@ -10,6 +10,7 @@ pub struct VolumePreference {
 #[derive(Default, Clone, PartialEq, Eq)]
 pub struct Config {
     pub load_failed: bool,
+    pub known_apps: BTreeMap<String, String>,
     pub hidden_apps: BTreeMap<String, crate::model::HiddenApp>,
     pub routes: BTreeMap<String, String>,
     pub explicit_routes: BTreeSet<String>,
@@ -144,6 +145,7 @@ impl Config {
                     "ManagedDefault" => config.managed_default = value == "1",
                     _ => {}
                 },
+                "KnownApps" => { config.known_apps.insert(key,value); }
                 "Routes" => {
                     if version != "3" { config.explicit_routes.insert(key.clone()); }
                     config.routes.insert(key,value);
@@ -189,6 +191,12 @@ impl Config {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let mut text = String::from("[General]\n");
         if let Some(device) = &self.default_device { text.push_str(&format!("DefaultDevice={}\n",ini_escape(device))); }
+        if !self.known_apps.is_empty() {
+            text.push_str("\n[KnownApps]\n");
+            for (key,name) in &self.known_apps {
+                text.push_str(&format!("{}={}\n",ini_escape(key),ini_escape(name)));
+            }
+        }
         let routes: Vec<_> = self.routes.iter().filter(|(key,_)| self.explicit_routes.contains(*key)).collect();
         if !routes.is_empty() {
             text.push_str("\n[Routes]\n");

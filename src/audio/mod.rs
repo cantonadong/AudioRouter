@@ -124,6 +124,9 @@ impl Drop for AudioClient {
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
+    fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
+    fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry) -> i32;
+    fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry) -> i32;
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
     fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
     fn QueryFullProcessImageNameW(
@@ -132,6 +135,19 @@ unsafe extern "system" {
         path: *mut u16,
         size: *mut u32,
     ) -> i32;
+}
+#[repr(C)]
+struct ProcessEntry {
+    size: u32,
+    usage: u32,
+    pid: u32,
+    heap: usize,
+    module: u32,
+    threads: u32,
+    parent: u32,
+    priority: i32,
+    flags: u32,
+    exe: [u16; 260],
 }
 fn process_path(pid: u32) -> String {
     if pid == 0 {
@@ -399,6 +415,15 @@ impl Backend {
         } else { backend.config.default_device = backend.default.clone(); }
         backend.mark_dirty();
         backend.read_values(STRUCTURE)?;
+        for key in backend.config.volumes.keys().chain(backend.config.app_mutes.keys())
+            .chain(backend.config.routes.keys()) {
+            if std::path::Path::new(key).is_absolute() {
+                let name = std::path::Path::new(key).file_stem()
+                    .map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| key.clone());
+                backend.config.known_apps.entry(key.clone()).or_insert(name);
+            }
+        }
+        backend.refresh_processes();
         if let Err(error) = backend.enforce_routes(false) {
             backend.failure(error);
         }
@@ -477,6 +502,15 @@ impl Backend {
                 }
             }
         }
+        for endpoint in &mut self.endpoints {
+            let mut represented: HashSet<_> = endpoint.sessions.iter()
+                .filter(|s| s.control.number(3).unwrap_or(0) != 2)
+                .map(|s| (s.pid, s.key.clone())).collect();
+            // Keep one expired representative only when no usable session remains.
+            endpoint.sessions.retain(|s| s.process_running()
+                && (s.control.number(3).unwrap_or(0) != 2
+                    || represented.insert((s.pid, s.key.clone()))));
+        }
         self.processes.retain(|_, process| process.alive());
         for session in self
             .endpoints
@@ -510,6 +544,39 @@ impl Backend {
     fn mark_dirty(&mut self) {
         self.dirty = Some(Instant::now() + Duration::from_millis(400));
     }
+    fn refresh_processes(&mut self) -> bool {
+        let before = self.processes.len();
+        self.processes.retain(|_, process| process.alive());
+        let mut changed = before != self.processes.len();
+        let names: HashSet<_> = self.config.known_apps.keys()
+            .filter_map(|key| std::path::Path::new(key).file_name())
+            .map(|name| name.to_string_lossy().to_lowercase()).collect();
+        if names.is_empty() { return changed; }
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(2, 0);
+            if snapshot == -1 { return changed; }
+            let mut entry: ProcessEntry = std::mem::zeroed();
+            entry.size = std::mem::size_of::<ProcessEntry>() as u32;
+            let mut more = Process32FirstW(snapshot, &mut entry);
+            while more != 0 {
+                let length = entry.exe.iter().position(|&c| c == 0).unwrap_or(entry.exe.len());
+                let name = String::from_utf16_lossy(&entry.exe[..length]).to_lowercase();
+                if !self.processes.contains_key(&entry.pid) && names.contains(&name) {
+                    let key = process_path(entry.pid).to_lowercase();
+                    if self.config.known_apps.contains_key(&key) {
+                        let handle = OpenProcess(0x1000, 0, entry.pid);
+                        if handle != 0 {
+                            self.processes.insert(entry.pid, TrackedProcess { handle, key });
+                            changed = true;
+                        }
+                    }
+                }
+                more = Process32NextW(snapshot, &mut entry);
+            }
+            CloseHandle(snapshot);
+        }
+        changed
+    }
     fn failure(&mut self, error: String) {
         config::log(&error);
         self.error = Some(error);
@@ -531,6 +598,11 @@ impl Backend {
                 let scalar = session.volume.scalar(4)?;
                 session.muted = session.volume.number(6)? != 0;
                 let key = session.key.clone();
+                if std::path::Path::new(&key).is_absolute()
+                    && self.config.known_apps.get(&key) != Some(&session.name) {
+                    self.config.known_apps.insert(key.clone(), session.name.clone());
+                    changed = true;
+                }
                 if session.needs_apply && !self.config.load_failed {
                     if let Some(&desired) = self.config.app_mutes.get(&key) {
                         if session.muted != desired { session.volume.set_mute(5,desired)?; session.muted = desired; }
@@ -555,7 +627,7 @@ impl Backend {
                     changed = true;
                 }
                 session.scalar = scalar;
-                if !session.muted && session.needs_apply && !self.config.load_failed {
+                if session.needs_apply && !self.config.load_failed {
                     let preference = self.config.volumes[&key];
                     let desired = preference.target as f32 / 100.0;
                     if (desired - scalar).abs() > 0.0001 {
@@ -643,7 +715,9 @@ impl Backend {
             Command::Volume { device, app, value } => {
                 if let Some(key) = app {
                     let mut sessions: Vec<_> = self.endpoints.iter_mut().flat_map(|d| d.sessions.iter_mut()).filter(|s| s.key == key).collect();
-                    if sessions.is_empty() { return Err("Audio session ended".into()); }
+                    if sessions.is_empty() && !self.processes.values().any(|p| p.key == key) {
+                        return Err("Application exited".into());
+                    }
                     let target = value.min(100);
                     for session in &mut sessions {
                         session.volume.set_scalar(3,target as f32 / 100.0)?;
@@ -673,7 +747,9 @@ impl Backend {
                         session.muted = muted;
                         found = true;
                     }
-                    if !found { return Err("Audio session ended".into()); }
+                    if !found && !self.processes.values().any(|p| p.key == key) {
+                        return Err("Application exited".into());
+                    }
                     self.config.app_mutes.insert(key,muted);
                 } else {
                     let endpoint = self.endpoints.iter_mut().find(|d| d.id == device).ok_or("Device disconnected")?;
@@ -712,13 +788,14 @@ impl Backend {
                 {
                     return Err("播放设备已断开".into());
                 }
-                let pids: HashSet<_> = self
+                let mut pids: HashSet<_> = self
                     .endpoints
                     .iter()
                     .flat_map(|d| d.sessions.iter())
                     .filter(|s| s.key == app && s.pid != 0)
                     .map(|s| s.pid)
                     .collect();
+                pids.extend(self.processes.iter().filter(|(_,p)| p.key == app).map(|(&pid,_)| pid));
                 if pids.is_empty() {
                     return Err("应用音频会话已结束，请重新播放后再选择设备".into());
                 }
@@ -808,6 +885,22 @@ impl Backend {
                 device.apps.push(App { key: key.into(), name: representative.name.clone(), icon_path: representative.path.clone(),
                     volume: if muted {0} else {(representative.scalar*100.0).round().clamp(0.0,100.0) as u8}, peak: 0.0, muted,
                     icon:0,route,preferred_route });
+            }
+        }
+        for process in self.processes.values() {
+            let key = &process.key;
+            if self.config.hidden_apps.contains_key(key)
+                || devices.iter().any(|d| d.apps.iter().any(|a| &a.key == key)) { continue; }
+            let preferred_route = self.config.routes.get(key).cloned();
+            let route = preferred_route.as_ref().and_then(|id| devices.iter().position(|d| &d.id == id));
+            if let Some(device) = devices.get_mut(route.unwrap_or(default)) {
+                let muted = self.config.app_mutes.get(key).copied().unwrap_or(false);
+                device.apps.push(App {
+                    key: key.clone(), name: self.config.known_apps.get(key).cloned().unwrap_or_else(|| key.clone()),
+                    icon_path: key.clone(), volume: if muted { 0 } else {
+                        self.config.volumes.get(key).map_or(100, |v| v.target)
+                    }, peak: 0.0, muted, icon: 0, route, preferred_route,
+                });
             }
         }
         for device in &mut devices { device.apps.sort_by(|a,b| (&a.name,&a.key).cmp(&(&b.name,&b.key))); }
@@ -914,7 +1007,12 @@ fn worker(receiver: mpsc::Receiver<Command>, wake: Arc<Wake>, updates: Arc<Updat
         }
         let mut flags = wake.flags.swap(0, Ordering::AcqRel);
         if Instant::now() >= next_sessions {
-            flags |= STRUCTURE;
+            let processes_changed = backend.as_mut().is_some_and(|b| b.refresh_processes());
+            if backend.as_ref().is_some_and(|b|
+                b.endpoints.iter().flat_map(|d| &d.sessions).any(|s| !s.process_running())
+                    || b.processes.values().any(|p| !p.alive())) || processes_changed {
+                flags |= STRUCTURE;
+            }
             next_sessions = Instant::now() + Duration::from_secs(2);
         }
         let mut commands: Vec<_> = receiver.try_iter().collect();

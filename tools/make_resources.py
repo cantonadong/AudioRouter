@@ -107,9 +107,9 @@ def version_block(key, value=b"", children=b"", text=False):
 
 
 def make_version():
-    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, 0x00010004, 0, 0x00010004, 0, 0x3F, 0, 0x40004, 1, 0, 0, 0)
+    fixed = struct.pack("<13I", 0xFEEF04BD, 0x10000, 0x00010005, 0, 0x00010005, 0, 0x3F, 0, 0x40004, 1, 0, 0, 0)
     strings = b""
-    for key, value in [("CompanyName", "cantonadong"), ("LegalCopyright", "Copyright (c) cantonadong"), ("FileDescription", "AudioRouter"), ("ProductName", "AudioRouter"), ("FileVersion", "1.4.0.0"), ("ProductVersion", "1.4.0.0"), ("OriginalFilename", "AudioRouter.exe")]:
+    for key, value in [("CompanyName", "cantonadong"), ("LegalCopyright", "Copyright (c) cantonadong"), ("FileDescription", "AudioRouter"), ("ProductName", "AudioRouter"), ("FileVersion", "1.5.0.0"), ("ProductVersion", "1.5.0.0"), ("OriginalFilename", "AudioRouter.exe")]:
         strings += align(version_block(key, (value + "\0").encode("utf-16-le"), text=True))
     table = version_block("040904B0", children=strings, text=True)
     info = version_block("StringFileInfo", children=align(table), text=True)
@@ -261,8 +261,11 @@ def main():
         state_icon = icon_image(vw,vh,vpixels,128)
         (ROOT / f"resources/volume{level}.bin").write_bytes(state_icon)
         (ROOT / f"resources/tray-volume{level}.bin").write_bytes(state_icon)
-        volume_group = bytearray(struct.pack("<HHH", 0, 1, 4))
-        for size in [16,24,32,48]:
+        # Supply native taskbar sizes for 100% through 800% DPI. Loading
+        # these directly avoids Explorer/User32 shrinking the 128px bitmap.
+        tray_sizes = [16,20,24,28,32,36,40,48,56,64,72,80,96,128]
+        volume_group = bytearray(struct.pack("<HHH", 0, 1, len(tray_sizes)))
+        for size in tray_sizes:
             image = icon_image(vw,vh,vpixels,size)
             resource_items.append((3, ordinal, image))
             volume_group.extend(struct.pack("<BBBBHHIH", size,size,0,0,1,32,len(image),ordinal))
