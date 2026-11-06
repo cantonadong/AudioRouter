@@ -442,6 +442,7 @@ impl Backend {
         }
     }
     fn rebuild(&mut self) -> Result<(), String> {
+        let previous_devices: HashSet<_> = self.endpoints.iter().map(|d| d.id.clone()).collect();
         unsafe {
             let enumerate: unsafe extern "system" fn(Raw, i32, u32, *mut Raw) -> Hr =
                 self.enumerator.method(3);
@@ -486,6 +487,9 @@ impl Backend {
         }
         self.endpoints
             .sort_by(|a, b| (&a.name, &a.id).cmp(&(&b.name, &b.id)));
+        if previous_devices != self.endpoints.iter().map(|d| d.id.clone()).collect() {
+            self.applied.clear();
+        }
         self.read_default();
         for (device, control) in self.wake.take_sessions() {
             if let Some(endpoint) = self.endpoints.iter_mut().find(|d| d.id == device) {
@@ -649,13 +653,19 @@ impl Backend {
             return Ok(());
         };
         let active: HashSet<_> = self.endpoints.iter().map(|d| d.id.clone()).collect();
+        let session_keys: HashSet<_> = self.endpoints.iter()
+            .flat_map(|d| &d.sessions)
+            .filter(|s| s.pid != 0 && s.control.number(3).unwrap_or(0) != 2)
+            .map(|s| s.key.as_str()).collect();
         let mut processes = BTreeMap::new();
         for (pid, process) in &self.processes {
-            processes.insert((*pid, process.key.clone()), ());
+            if !session_keys.contains(process.key.as_str()) {
+                processes.insert((*pid, process.key.clone()), ());
+            }
         }
         for endpoint in &self.endpoints {
             for session in &endpoint.sessions {
-                if session.pid != 0 {
+                if session.pid != 0 && session.control.number(3).unwrap_or(0) != 2 {
                     processes.insert((session.pid, session.key.clone()), ());
                 }
             }
@@ -672,15 +682,13 @@ impl Backend {
                     imported = true;
                 }
             }
-            // Resolve logical "follow default" to the current endpoint. Clearing
-            // the persisted override alone can leave an existing stream on its
-            // previous device. Cache the resolved ID so default changes also
-            // cause a new routing write, without pinning it in our preferences.
+            // Follow default by clearing the Windows override, not by pinning
+            // the process to the endpoint that happens to be default now.
             let desired = match self.config.routes.get(&key) {
                 Some(id) if active.contains(id) => Some(id.clone()),
                 Some(_) => self.default.clone()
                     .or_else(|| self.endpoints.first().map(|d| d.id.clone())),
-                None => self.default.clone(),
+                None => None,
             };
             let cache_key = (pid, key);
             if self.applied.get(&cache_key) == Some(&desired) {
@@ -773,6 +781,7 @@ impl Backend {
                 self.enforce_routes(true)?;
             }
             Command::Route { app, device } => {
+                config::log(&format!("应用路由请求：{app} -> {}", device.as_deref().unwrap_or("默认")));
                 // Windows may have changed its default since the last callback.
                 self.read_default();
                 if app == "__system_sounds__" {
@@ -788,21 +797,22 @@ impl Backend {
                 {
                     return Err("播放设备已断开".into());
                 }
+                let device = device.filter(|id| self.default.as_ref() != Some(id));
                 let mut pids: HashSet<_> = self
                     .endpoints
                     .iter()
                     .flat_map(|d| d.sessions.iter())
-                    .filter(|s| s.key == app && s.pid != 0)
+                    .filter(|s| s.key == app && s.pid != 0 && s.control.number(3).unwrap_or(0) != 2)
                     .map(|s| s.pid)
                     .collect();
-                pids.extend(self.processes.iter().filter(|(_,p)| p.key == app).map(|(&pid,_)| pid));
+                if pids.is_empty() {
+                    pids.extend(self.processes.iter().filter(|(_,p)| p.key == app).map(|(&pid,_)| pid));
+                }
                 if pids.is_empty() {
                     return Err("应用音频会话已结束，请重新播放后再选择设备".into());
                 }
-                let target = device.as_ref().or(self.default.as_ref())
-                    .ok_or("当前没有可用的默认播放设备")?;
                 for pid in pids {
-                    routing.set(pid, Some(target.as_str()))?;
+                    routing.set(pid, device.as_deref())?;
                 }
                 if let Some(device) = device {
                     self.config.explicit_routes.insert(app.clone());

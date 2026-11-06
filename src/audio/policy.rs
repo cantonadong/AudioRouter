@@ -124,10 +124,6 @@ impl Routing {
             // This per-process API supports multimedia and console routing.
             // Unlike the system default API, writing the communications role can
             // return E_INVALIDARG after the other roles have already changed.
-            let changed: Vec<_> = [1, 0].into_iter()
-                .filter(|role| self.get_role(pid, *role) != Some(desired.clone()))
-                .collect();
-            if changed.is_empty() { return Ok(()); }
             let mut string = null_mut();
             if let Some(device) = device {
                 let text = wide(&format!("{PREFIX}{device}{SUFFIX}"));
@@ -139,8 +135,9 @@ impl Routing {
             let factory = self.factory.as_ref().unwrap();
             let set: unsafe extern "system" fn(Raw, u32, i32, i32, Raw) -> Hr = factory.method(25);
             let mut result = Ok(());
-            for role in changed {
-                if let Err(error) = check(set(factory.0, pid, 0, role, string), "切换应用输出设备")
+            for role in [1, 0] {
+                if let Err(error) = check(set(factory.0, pid, 0, role, string),
+                    &format!("切换应用输出设备（PID {pid}，角色 {role}，设备 {}）", device.unwrap_or("默认")))
                 {
                     result = Err(error);
                     break;
