@@ -653,15 +653,9 @@ impl Backend {
             return Ok(());
         };
         let active: HashSet<_> = self.endpoints.iter().map(|d| d.id.clone()).collect();
-        let session_keys: HashSet<_> = self.endpoints.iter()
-            .flat_map(|d| &d.sessions)
-            .filter(|s| s.pid != 0 && s.control.number(3).unwrap_or(0) != 2)
-            .map(|s| s.key.as_str()).collect();
         let mut processes = BTreeMap::new();
         for (pid, process) in &self.processes {
-            if !session_keys.contains(process.key.as_str()) {
-                processes.insert((*pid, process.key.clone()), ());
-            }
+            processes.insert((*pid, process.key.clone()), ());
         }
         for endpoint in &self.endpoints {
             for session in &endpoint.sessions {
@@ -787,8 +781,7 @@ impl Backend {
                 if app == "__system_sounds__" {
                     return Err("系统声音由 Windows 管理，跟随默认播放设备".into());
                 }
-                let routing = self
-                    .routing
+                self.routing
                     .as_ref()
                     .ok_or("当前 Windows 版本不支持应用输出路由，请使用系统音量设置")?;
                 if device
@@ -797,7 +790,8 @@ impl Backend {
                 {
                     return Err("播放设备已断开".into());
                 }
-                let device = device.filter(|id| self.default.as_ref() != Some(id));
+                self.refresh_processes();
+                let routing = self.routing.as_ref().unwrap();
                 let mut pids: HashSet<_> = self
                     .endpoints
                     .iter()
@@ -805,9 +799,7 @@ impl Backend {
                     .filter(|s| s.key == app && s.pid != 0 && s.control.number(3).unwrap_or(0) != 2)
                     .map(|s| s.pid)
                     .collect();
-                if pids.is_empty() {
-                    pids.extend(self.processes.iter().filter(|(_,p)| p.key == app).map(|(&pid,_)| pid));
-                }
+                pids.extend(self.processes.iter().filter(|(_,p)| p.key == app).map(|(&pid,_)| pid));
                 if pids.is_empty() {
                     return Err("应用音频会话已结束，请重新播放后再选择设备".into());
                 }
@@ -1051,6 +1043,9 @@ fn worker(receiver: mpsc::Receiver<Command>, wake: Arc<Wake>, updates: Arc<Updat
             continue;
         };
         let mut publish = flags & !COMMAND != 0 || !commands.is_empty();
+        if flags & ROUTE_INVALIDATED != 0 {
+            backend.applied.clear();
+        }
         if flags & (STRUCTURE | DEFAULT) != 0 {
             if let Err(error) = backend
                 .rebuild()

@@ -11,6 +11,7 @@ pub const ENDPOINT: u32 = 2;
 pub const SESSION_VOLUME: u32 = 4;
 pub const COMMAND: u32 = 8;
 pub const DEFAULT: u32 = 16;
+pub const ROUTE_INVALIDATED: u32 = 32;
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
@@ -159,10 +160,10 @@ struct DeviceTable {
     property: unsafe extern "system" fn(Raw, *const u16, PropertyKey) -> Hr,
 }
 unsafe extern "system" fn device_state(this: Raw, _: *const u16, _: u32) -> Hr {
-    unsafe { signal(this, STRUCTURE) }
+    unsafe { signal(this, STRUCTURE | ROUTE_INVALIDATED) }
 }
 unsafe extern "system" fn device_change(this: Raw, _: *const u16) -> Hr {
-    unsafe { signal(this, STRUCTURE) }
+    unsafe { signal(this, STRUCTURE | ROUTE_INVALIDATED) }
 }
 unsafe extern "system" fn default_change(this: Raw, flow: i32, _: i32, _: *const u16) -> Hr {
     if flow == 0 {
@@ -172,7 +173,7 @@ unsafe extern "system" fn default_change(this: Raw, flow: i32, _: i32, _: *const
     }
 }
 unsafe extern "system" fn property_change(this: Raw, _: *const u16, _: PropertyKey) -> Hr {
-    unsafe { signal(this, STRUCTURE) }
+    unsafe { signal(this, STRUCTURE | ROUTE_INVALIDATED) }
 }
 static DEVICE_TABLE: DeviceTable = DeviceTable {
     base: BASE,
